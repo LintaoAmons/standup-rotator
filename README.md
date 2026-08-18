@@ -23,6 +23,7 @@ requests it became the Worker you see here:
 - "can I configure the send time?" → portal-editable announcement time (SGT)
 - "add a sent history" → an audit panel of every delivery, successes and failures
 - "make send and rotation independent — always send" → decoupled send, slot-gated broadcast
+- "show me when the next notification goes out" → a live "Next notification in Xh Ym" countdown
 
 No tickets, no branches to babysit, no hand-offs — the requirement, the code, the tests and
 the deploy were one continuous conversation, and the same agent that wrote it verified it
@@ -40,7 +41,7 @@ honest example of what "talk to it and it ships" looks like end to end.)*
 | `GET /today` | a UI | Ensure today has a pick and return it as JSON. Idempotent — repeated calls never re-pick. Does not announce. |
 | `POST /skip` | two UI buttons | The current facilitator steps aside and the next available member takes today. The `mode` form field picks the kind: **`requeue`** ("Skip (goes next)") requeues the skipped person as next — tomorrow is them (order changes); **`pass`** ("Skip (pass)") leaves the rotation order untouched — the skipped person waits their natural turn. Default `requeue`. See the rules table. Persists, then redirects to `/`. |
 | `POST /trigger` | a UI button (beside Skip) | Announce **today's** facilitator to Google Chat **now, without rotating**. When no webhook is configured it does not silently no-op — it redirects with a visible hint to set the webhook first. Every real POST (this and the auto broadcast) records a **Sent history** row, successes and failures alike. |
-| `GET /` | a browser | Status **and editing** page: today's pick, **Next up (predicted)** for the coming working days, the rotation (with add / rename / reorder / remove), leave (add / remove), recent facilitators, the **announcement time** (SGT), the Google Chat webhook, and **Sent history** (the last 20 real deliveries, times in SGT). Never triggers a pick on load. |
+| `GET /` | a browser | Status **and editing** page: today's pick, **Next up (predicted)** for the coming working days, the rotation (with add / rename / reorder / remove), leave (add / remove), recent facilitators, the **announcement time** (SGT), the Google Chat webhook, a live **Next notification** countdown, and **Sent history** (the last 20 real deliveries, times in SGT). Never triggers a pick on load. |
 | `POST /members/{add,rename,delete,move}`, `POST /leave/{add,delete}` | the page's forms | Roster and leave CRUD. Each redirects back to `/` (Post/Redirect/Get), a rename with a `Saved.` confirmation. |
 | `POST /settings/time`, `POST /settings/webhook` | the page's forms | Set the daily announcement time (HH:MM, **SGT**) and the Google Chat webhook. Validated before storing; effective on the next tick, no redeploy. |
 | cron `scheduled` | Cloudflare cron (every 5 min) | Heartbeat. Every working-day tick **advances the rotation** (idempotent daily pick). **Decoupled** from that, a runtime gate (`shouldAnnounce`) sends today's facilitator to Google Chat **once per (date, configured-time) slot** — so editing the announcement time re-arms today's send. The send is a pure projection and never advances the rotation. **Not gated** by the password — runs regardless. |
@@ -151,6 +152,14 @@ Every real delivery — the auto broadcast and the manual **Announce** button �
 the **Sent history** panel (last 20, newest first, times in SGT), including **failures** with
 a short reason. A send that never happens (no webhook configured) is not a delivery and is not
 logged, so the panel is signal, not noise.
+
+The page also shows a live **Next notification in Xh Ym** countdown. The moment is computed
+server-side by the pure `nextNotification()` from the real send semantics — working day,
+configured time, and whether today's slot has already gone out, all in SGT — so a Friday
+after the send, and Saturday/Sunday, all count down to Monday. Because the cron checks every
+5 minutes, the actual send lands within ~5 minutes of that time, and the indicator says so
+(**±5 min**). With **no webhook configured** it shows "no webhook configured" rather than
+counting down to a broadcast that cannot happen.
 
 ## Deploy
 

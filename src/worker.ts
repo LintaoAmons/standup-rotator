@@ -12,6 +12,7 @@ import {
   formatSgt,
   isValidTime,
   moveInOrder,
+  nextNotification,
   predict,
   type Facilitation,
   type Leave,
@@ -399,8 +400,38 @@ async function renderPage(repo: Repo, date: string, flash: string | null = null)
   const todayPick: Facilitation | null = await repo.on(date);
   const webhook = await repo.getWebhook();
   const announceTime = await repo.getAnnounceTime();
+  const lastSentSlot = await repo.getLastSentSlot();
   // Sent history: the last 20 real webhook deliveries, newest first. Read-only.
   const sends = await repo.recentSends(20);
+
+  // Next-notification indicator (owner ask 2026-08-18). Computed server-side from
+  // the real send semantics; the page's embedded JS only counts down to this
+  // instant. Uses the actual wall clock (new Date()) — the ?date= override drives
+  // the pick date in tests, not this real-time countdown. No webhook -> the pure
+  // function returns "no-webhook" and the section says so instead of counting down
+  // to a broadcast that cannot happen.
+  const nextNoti = nextNotification(new Date(), announceTime, lastSentSlot, webhook !== "");
+  const nextNotiSection =
+    nextNoti.kind === "no-webhook"
+      ? `<p class="hint">No upcoming notification — no Google Chat webhook configured. Set the webhook in the field above to enable the daily announcement.</p>`
+      : `<p class="hint" id="next-noti" data-target="${nextNoti.at.getTime()}">Next notification in <span id="next-noti-eta">…</span> — ${esc(formatSgt(nextNoti.at.toISOString()))} SGT.</p>
+  <p class="hint">The cron checks every 5 minutes, so the actual send lands within about 5 minutes of that time (±5 min).</p>
+  <script>
+  (function(){
+    var el = document.getElementById('next-noti');
+    if (!el) return;
+    var eta = document.getElementById('next-noti-eta');
+    var target = parseInt(el.getAttribute('data-target'), 10);
+    function tick(){
+      var diff = target - Date.now();
+      if (diff <= 0) { eta.textContent = 'any moment now'; return; }
+      var mins = Math.floor(diff / 60000);
+      eta.textContent = Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm';
+    }
+    tick();
+    setInterval(tick, 60000); // refresh the page after the time passes to roll to the next slot
+  })();
+  </script>`;
 
   // Project the next 5 working days from today. Pure projection over the current
   // roster/order/leave + recorded history; nothing is written.
@@ -582,6 +613,9 @@ async function renderPage(repo: Repo, date: string, flash: string | null = null)
     <button type="submit">Save</button>
   </form>
   <p class="hint">Empty = announcements off. The daily ${esc(announceTime)} SGT pick is still recorded silently either way.</p>
+
+  <h2>Next notification</h2>
+  ${nextNotiSection}
 
   <h2>Sent history</h2>
   <table>

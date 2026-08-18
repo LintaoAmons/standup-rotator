@@ -337,3 +337,63 @@ export function predict(
   }
   return out;
 }
+
+// ---- next-notification indicator (display-only, owner ask 2026-08-18) --------
+//
+// The portal shows a live "Next notification in Xh Ym" countdown beside the
+// settings. The MOMENT is computed HERE, server-side, from the SAME send
+// semantics the scheduled gate uses (working-day + configured time + whether this
+// (date, time) slot was already sent, all reckoned in SGT), so the browser never
+// reimplements the gate — the embedded JS only counts down to the instant this
+// returns. Pure: `now` is injected, no D1, no clock of its own, so the four
+// boundaries below are unit-testable.
+//
+//   - webhook not configured -> { kind: "no-webhook" }. Counting down to a send
+//     that cannot happen (announce is off) is a lie, so the indicator says so
+//     instead — this is the owner's explicit rule, not a fallback.
+//   - today is a working day AND this (date, time) slot is not yet sent ->
+//     today at the configured time. If that instant is already past (the ≤5-min
+//     window between the time and the next cron tick, or a stalled roster) it is
+//     returned unchanged so the UI reads "due now" — the send really is imminent,
+//     not tomorrow.
+//   - today's slot already sent, OR today is a weekend -> the next working day at
+//     the configured time (a Friday already-sent and Sat/Sun all roll to Monday).
+//
+// The returned instant is a UTC Date (what the browser's Date math wants); it is
+// the SGT wall-clock `announceTime` on the chosen calendar day, converted back to
+// UTC by the same fixed offset as dayOf/minuteOf. The `lastSentSlot` argument is
+// the send's own idempotency key (see sendSlot) — the indicator is a projection
+// of the send gate and reads that same state, never rotation history.
+export type NextNotification =
+  | { kind: "no-webhook" }
+  | { kind: "scheduled"; at: Date };
+
+export function nextNotification(
+  now: Date,
+  announceTime: string,
+  lastSentSlot: string,
+  webhookConfigured: boolean,
+  offsetMinutes: number = STANDUP_UTC_OFFSET_MINUTES,
+): NextNotification {
+  if (!webhookConfigured) return { kind: "no-webhook" };
+  const today = dayOf(now, offsetMinutes);
+  // "Pending today" mirrors shouldAnnounce's slot check exactly (minus the time
+  // comparison): today still owes a send iff it is a working day and this slot has
+  // not gone out. When it does not, walk forward to the next working day.
+  const pendingToday = isWorkingDay(today) && lastSentSlot !== sendSlot(today, announceTime);
+  let day = today;
+  if (!pendingToday) {
+    do {
+      day = addDays(day, 1);
+    } while (!isWorkingDay(day));
+  }
+  return { kind: "scheduled", at: sgtWallClockToInstant(day, announceTime, offsetMinutes) };
+}
+
+// sgtWallClockToInstant maps an SGT calendar date + HH:MM to the UTC instant it
+// denotes — the inverse of the dayOf/minuteOf shift. SGT = UTC + offset, so the
+// UTC instant is that Y-M-D-H-M read as if it were UTC, shifted back by the offset.
+function sgtWallClockToInstant(date: string, hhmm: string, offsetMinutes: number): Date {
+  const asUtc = Date.parse(`${date}T${hhmm}:00Z`);
+  return new Date(asUtc - offsetMinutes * 60_000);
+}
