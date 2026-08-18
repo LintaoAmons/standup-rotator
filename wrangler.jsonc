@@ -1,0 +1,36 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "standup-rotator",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-07-01",
+  "observability": { "enabled": true },
+
+  // Cron: fire every 5 minutes, EVERY day. The announcement time is now
+  // portal-configurable (D1 settings.announce_time, HH:MM SGT) and Cloudflare cron
+  // is static at deploy time, so the cron can't itself carry the time. It ticks
+  // frequently as a plain heartbeat and a RUNTIME gate (shouldAnnounce in
+  // src/domain.ts) decides the once-per-day send, reckoning working-day + time in
+  // SGT. The cron is deliberately NOT restricted to `1-5`: a UTC weekday != an SGT
+  // weekday at the edges (SGT Mon 00:00–07:59 is Sunday UTC), so a UTC `1-5` would
+  // miss early-Monday SGT times and leak into Saturday SGT. Letting it fire daily
+  // and gating in SGT removes that skew. Nearly every tick is a cheap no-op read.
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+
+  // D1 binding. `database_id` is a placeholder — master fills it in after
+  // `wrangler d1 create standup-rotator` (see DEPLOY.md). Local dev (miniflare)
+  // ignores the id and uses a local SQLite file under .wrangler/, so no login or
+  // real database is needed to run and test.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "standup-rotator",
+      "database_id": "ac0fca21-048c-4f32-bea3-91a910f8cda0"
+    }
+  ]
+
+  // GOOGLE_CHAT_WEBHOOK is intentionally NOT declared here. It is set later as a
+  // secret (`wrangler secret put GOOGLE_CHAT_WEBHOOK`). Absent -> runs pick and
+  // record silently; present -> scheduled runs announce.
+}
