@@ -4,6 +4,10 @@ Picks who facilitates the next standup. Given the roster, who facilitated last, 
 on leave, it advances the rotation, records the pick, and announces it to Google Chat — all
 from one **Cloudflare Worker + D1**. No server, no container, no cron host of your own.
 
+![The standup-rotator portal: today's facilitator, the predicted next-up list, in-page rotation and leave editing, the SGT announcement time, the Google Chat webhook, a live next-notification countdown, and the sent-history audit panel.](docs/portal.png)
+
+*(Screenshot from a throwaway demo instance — every name, time, webhook and delivery above is invented sample data.)*
+
 ## Built by talking to UnDercontrol
 
 This whole app was built by conversation. I never opened an editor for it — I described what
