@@ -7,8 +7,8 @@ from one **Cloudflare Worker + D1**. No server, no container, no cron host of yo
 ## Built by talking to UnDercontrol
 
 This whole app was built by conversation. I never opened an editor for it — I described what
-I wanted to my own product, [**UnDercontrol**](https://ud.oatnil.com), from my daily
-stand-up notes, and its remote coding agent found the old tool, rewrote it, wrote the tests,
+I wanted by talking to [**UnDercontrol**](https://ud.oatnil.com) remotely, from my daily
+stand-up notes, and its coding agent found the old tool, rewrote it, wrote the tests,
 deployed it to Cloudflare, and read back the live result — each request shipped the **same
 day** it was asked for.
 
