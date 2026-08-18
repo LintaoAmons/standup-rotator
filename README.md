@@ -1,14 +1,36 @@
-# standup-rotator (Cloudflare)
+# standup-rotator
 
 Picks who facilitates the next standup. Given the roster, who facilitated last, and who is
-on leave, it advances the rotation, records the pick, and (optionally) announces it to
-Google Chat.
+on leave, it advances the rotation, records the pick, and announces it to Google Chat — all
+from one **Cloudflare Worker + D1**. No server, no container, no cron host of your own.
 
-Runs as a **single Cloudflare Worker + D1** — no server, no container, no cron host of your
-own. This is a TypeScript rewrite of the original Go `standup-rotator`, which ran offline
-against local CSV files; the rotation rules are ported unchanged (and re-covered by unit
-tests), while storage moved from CSV to D1 and the trigger moved from a CLI to the Worker's
-HTTP + cron handlers.
+## Built by talking to UnDercontrol
+
+This whole app was built by conversation. I never opened an editor for it — I described what
+I wanted to my own product, [**UnDercontrol**](https://ud.oatnil.com), from my daily
+stand-up notes, and its remote coding agent found the old tool, rewrote it, wrote the tests,
+deployed it to Cloudflare, and read back the live result — each request shipped the **same
+day** it was asked for.
+
+It started as a legacy Go CLI that read local CSV files. Across a handful of plain-language
+requests it became the Worker you see here:
+
+- "rewrite it as a fully-managed Cloudflare app, no server of mine" → single Worker + D1
+- "add CRUD, I'll obviously need to edit the roster" → in-page add / rename / reorder / remove
+- "put a login password on it" → one-password gate, secret-derived sessions
+- "let me set and rotate the Google Chat webhook from the page" → webhook moved into D1
+- "add another kind of skip — just skip, don't push the person forward" → two skip modes
+- "can I configure the send time?" → portal-editable announcement time (SGT)
+- "add a sent history" → an audit panel of every delivery, successes and failures
+- "make send and rotation independent — always send" → decoupled send, slot-gated broadcast
+
+No tickets, no branches to babysit, no hand-offs — the requirement, the code, the tests and
+the deploy were one continuous conversation, and the same agent that wrote it verified it
+running in production. That is what UnDercontrol is for: [ud.oatnil.com](https://ud.oatnil.com)
+· [oatnil.com](https://oatnil.com).
+
+*(This is a real internal tool, published as-is. It is not a template or a starter — just an
+honest example of what "talk to it and it ships" looks like end to end.)*
 
 ## What it does
 
@@ -20,7 +42,7 @@ HTTP + cron handlers.
 | `POST /trigger` | a UI button (beside Skip) | Announce **today's** facilitator to Google Chat **now, without rotating**. When no webhook is configured it does not silently no-op — it redirects with a visible hint to set the webhook first. Every real POST (this and the auto broadcast) records a **Sent history** row, successes and failures alike. |
 | `GET /` | a browser | Status **and editing** page: today's pick, **Next up (predicted)** for the coming working days, the rotation (with add / rename / reorder / remove), leave (add / remove), recent facilitators, the **announcement time** (SGT), the Google Chat webhook, and **Sent history** (the last 20 real deliveries, times in SGT). Never triggers a pick on load. |
 | `POST /members/{add,rename,delete,move}`, `POST /leave/{add,delete}` | the page's forms | Roster and leave CRUD. Each redirects back to `/` (Post/Redirect/Get), a rename with a `Saved.` confirmation. |
-| `POST /settings/time` | the page's form | Set the daily announcement time (HH:MM, **SGT**). Validated before storing; effective on the next tick, no redeploy. |
+| `POST /settings/time`, `POST /settings/webhook` | the page's forms | Set the daily announcement time (HH:MM, **SGT**) and the Google Chat webhook. Validated before storing; effective on the next tick, no redeploy. |
 | cron `scheduled` | Cloudflare cron (every 5 min) | Heartbeat. Every working-day tick **advances the rotation** (idempotent daily pick). **Decoupled** from that, a runtime gate (`shouldAnnounce`) sends today's facilitator to Google Chat **once per (date, configured-time) slot** — so editing the announcement time re-arms today's send. The send is a pure projection and never advances the rotation. **Not gated** by the password — runs regardless. |
 
 ## Password gate
@@ -65,8 +87,8 @@ these cases rather than discovering them in production. All are covered by `test
 | Someone on leave | Skipped, rotation continues past them |
 | Last facilitator has left the team | Resume after the newest facilitator still on the roster — never restart at the top |
 | Everyone on leave | Explicit error, never an arbitrary pick |
-| **Skip · goes next** (owner rule, 2026-08-18) | The replacement runs today; the skipped person is **requeued as next** (moved right behind the replacement in the rotation order), so tomorrow is them — they do not sink to the back to wait a whole cycle. This is `skipStandup("requeue")` + `moveAfter`; `next()` itself is unchanged. |
-| **Skip · pass** (owner rule, 2026-08-18) | The replacement runs today, but the rotation **order is left untouched** — the skipped person is not requeued and waits their natural turn (the rotation continues from the replacement, so they come back around after a full cycle). This is `skipStandup("pass")` — identical to `requeue` minus the `moveAfter` reorder. |
+| **Skip · goes next** | The replacement runs today; the skipped person is **requeued as next** (moved right behind the replacement in the rotation order), so tomorrow is them — they do not sink to the back to wait a whole cycle. This is `skipStandup("requeue")` + `moveAfter`; `next()` itself is unchanged. |
+| **Skip · pass** | The replacement runs today, but the rotation **order is left untouched** — the skipped person is not requeued and waits their natural turn (the rotation continues from the replacement, so they come back around after a full cycle). This is `skipStandup("pass")` — identical to `requeue` minus the `moveAfter` reorder. |
 | Single-member roster | That member repeats; legal, not an error |
 
 ## Idempotency
@@ -80,13 +102,13 @@ outage can never cause the same person to be picked twice.
 ## Architecture
 
 ```
-src/domain.ts    Member/Roster/Leave/Facilitation + next()/unavailable()/covers()/moveInOrder() — pure
-src/service.ts   runStandup(): check idempotency -> pick -> record -> notify
-src/repo.ts      Repo port + D1Repo (reads + roster/leave CRUD)
+src/domain.ts    Member/Roster/Leave/Facilitation + next()/unavailable()/covers()/moveInOrder()/predict() — pure
+src/service.ts   runStandup() + skipStandup() + runScheduledTick(): idempotency -> pick -> record -> (decoupled) notify
+src/repo.ts      Repo port + D1Repo (reads + roster/leave CRUD + settings + send log)
 src/auth.ts      password gate: constant-time verify, secret-derived session cookie
 src/notify.ts    Google Chat webhook notifier (optional)
-src/worker.ts    fetch (login, /today, /skip, CRUD, /) + scheduled (cron), embedded HTML
-test/            domain + service + auth + crud unit tests (vitest), in-memory Repo fake
+src/worker.ts    fetch (login, /today, /skip, /trigger, CRUD, settings, /) + scheduled (cron), embedded HTML
+test/            domain + service + auth + crud + settings + send-log + announce unit tests (vitest), in-memory Repo fake
 schema.sql       D1 tables (roster, leave, history, settings, send_log)
 seed.sql         sample team for local testing
 ```
@@ -99,7 +121,7 @@ case unit-testable with an in-memory fake and no Worker runtime.
 
 ```sh
 npm install
-npm test                 # unit tests: rotation edges + orchestration/idempotency + CRUD + auth
+npm test                 # unit tests: rotation edges + orchestration/idempotency + CRUD + auth + settings + send log
 npm run typecheck
 
 # local D1 (miniflare — a local SQLite file under .wrangler/, no login):
@@ -123,7 +145,7 @@ sign in and paste it into the **Google Chat webhook** field on the page. The Wor
 announces **only if** that field is non-empty; empty == off, and scheduled runs then pick
 and record silently and never error. The daily send time is set in the **Announcement time**
 field (HH:MM, SGT; default 09:00). Editing it **re-arms** today's send — save a new time that
-has already passed and it goes out again within minutes (owner rule, 2026-08-18) — see `DEPLOY.md`.
+has already passed and it goes out again within minutes — see `DEPLOY.md`.
 
 Every real delivery — the auto broadcast and the manual **Announce** button — is recorded in
 the **Sent history** panel (last 20, newest first, times in SGT), including **failures** with
@@ -132,4 +154,14 @@ logged, so the panel is signal, not noise.
 
 ## Deploy
 
-See **`DEPLOY.md`** — the exact commands master runs after `wrangler login`.
+Three steps after `wrangler login`, all in **`DEPLOY.md`**:
+
+1. `wrangler d1 create standup-rotator` and paste the returned `database_id` into `wrangler.jsonc`.
+2. Apply the schema to the remote D1 (`schema.sql`), then set the login secret
+   (`wrangler secret put APP_PASSWORD`).
+3. `wrangler deploy`. Sign in, add the roster, and paste the Google Chat webhook into the page.
+
+The `database_id` in `wrangler.jsonc` is a resource identifier, not a credential — it is
+useless without a Cloudflare API token, so it is safe in a public repo. The login password
+and the webhook are **never** committed (`.dev.vars` is gitignored; the prod webhook lives in
+D1, the prod password in a Cloudflare secret).
