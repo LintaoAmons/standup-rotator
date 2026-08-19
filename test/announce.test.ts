@@ -231,4 +231,29 @@ describe("runScheduledTick — decoupled rotation + slot-gated send", () => {
     expect(repo.records).toHaveLength(0); // weekend advances no rotation either
     expect(repo.lastSentSlot).toBe("");
   });
+
+  // Owner report 2026-08-19 "Daily roaster should skip the weekend": walk a full
+  // Sat -> Sun -> Mon arc on ONE repo to prove BOTH weekend days are inert (no
+  // send, no rotation) and Monday then resumes normally — the pick Monday makes is
+  // ana (first in the roster), untouched by the two silent weekend ticks. This
+  // guards the whole runScheduledTick gate (service.ts:206), not just shouldAnnounce.
+  it("skips both Sat and Sun (no send, no rotation), then resumes on Monday", async () => {
+    // SGT 09:00 == UTC 01:00. 2026-07-25 Sat, 07-26 Sun, 07-27 Mon.
+    const sat = await runScheduledTick(repo, new Date("2026-07-25T01:00:00Z"));
+    expect(sat.fired).toBe(false);
+    expect(repo.records).toHaveLength(0); // Saturday: no pick
+    expect(repo.lastSentSlot).toBe(""); // Saturday: no send stamped
+
+    const sun = await runScheduledTick(repo, new Date("2026-07-26T01:00:00Z"));
+    expect(sun.fired).toBe(false);
+    expect(repo.records).toHaveLength(0); // Sunday: still no pick
+    expect(repo.lastSentSlot).toBe(""); // Sunday: still no send
+
+    const mon = await runScheduledTick(repo, new Date("2026-07-27T01:00:00Z"));
+    expect(mon.fired).toBe(true);
+    expect(mon.result?.member.id).toBe("ana"); // Monday picks the roster head, unshifted by the weekend
+    expect(repo.records).toHaveLength(1); // exactly one pick — Monday's
+    expect((await repo.on("2026-07-27"))?.memberId).toBe("ana");
+    expect(repo.lastSentSlot).toBe("2026-07-27|09:00"); // Monday's slot stamped
+  });
 });
