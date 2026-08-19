@@ -397,3 +397,146 @@ function sgtWallClockToInstant(date: string, hhmm: string, offsetMinutes: number
   const asUtc = Date.parse(`${date}T${hhmm}:00Z`);
   return new Date(asUtc - offsetMinutes * 60_000);
 }
+
+// ---- month calendar (display-only, owner ask 2026-08-19) --------------------
+//
+// The portal's /calendar view: a Mon–Sun month grid showing who facilitates each
+// day. It is a PURE PROJECTION with exactly ONE authority per day, never a second
+// rotation engine — that is the whole point of the owner's acceptance rule:
+//
+//   past working day  -> the RECORDED pick (history row for that date). What
+//                        actually happened; a rename never rewrites it (member_id).
+//   today             -> `todayPick` (repo.on(today)) — the SAME value the portal's
+//                        top "Today" line renders. Passed in, never re-derived, so
+//                        the today cell and the Today line CANNOT disagree (owner's
+//                        added criterion). Null (== "not picked yet") stays null.
+//   future working day-> predict() replayed forward. Reuses the one rotation rule;
+//                        no parallel computation to drift from real broadcasts.
+//   weekend           -> blank (no pick, no send). Reckoned by isWorkingDay.
+//
+// The junction (today | tomorrow) is exactly why predict() is anchored on history
+// that INCLUDES today's recorded pick: predict(fromDate = today) projects strictly
+// AFTER today, so tomorrow correctly follows today's recorded person with no
+// special-case seam. Cross-month edges fall out of plain YYYY-MM-DD arithmetic —
+// leading/trailing padding days carry inMonth:false but are otherwise real cells.
+// Both seams are unit-tested by name (calendar.test.ts) per the owner's ask.
+
+// MonthCell is one square of the grid. member is null for weekends, gaps
+// (a past day with no recorded pick, e.g. before the project started or all on
+// leave), and a not-yet-picked today. origin records provenance for styling and
+// for the tests to assert which authority filled the cell.
+export interface MonthCell {
+  date: string; // YYYY-MM-DD
+  inMonth: boolean; // false = padding day from the previous/next month
+  weekend: boolean;
+  isToday: boolean;
+  member: Member | null;
+  origin: "history" | "today" | "predicted" | null;
+  sent: boolean; // a successful send_log delivery exists for this SGT date
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
+// mondayIndex maps a date to its column in a Mon-first week: Mon=0 … Sun=6.
+// getUTCDay is Sun=0 … Sat=6, so (+6)%7 rotates Monday to zero.
+function mondayIndex(date: string): number {
+  return (new Date(date + "T00:00:00Z").getUTCDay() + 6) % 7;
+}
+
+// daysInMonth for a 1-based month. Date.UTC(year, month, 0) is day 0 of the NEXT
+// month — i.e. the last day of `month` — whose getUTCDate is the day count.
+function daysInMonth(year: number, month: number): number {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+// resolveMember maps an id to its roster entry, falling back to a name==id stub
+// for a departed member still named in history (same "history never lies" rule as
+// the rest of the app — a past pick stays truthful after the member is deleted).
+function resolveMember(roster: Roster, id: string): Member {
+  return roster.members.find((m) => m.id === id) ?? { id, name: id, handle: "" };
+}
+
+// buildMonth assembles the whole visible grid for (year, month) — leading days
+// back to the Monday on/before the 1st, the month itself, then trailing days out
+// to the Sunday on/after the last. Pure: every input is plain data (history is
+// newest-first from repo.recent; sentDates is the set of SGT dates that had a
+// successful send; todayPick is repo.on(today)), so the junction and month-edge
+// behaviour is testable with no D1 and no Worker.
+export function buildMonth(
+  roster: Roster,
+  history: Facilitation[],
+  leaves: Leave[],
+  sentDates: Set<string>,
+  today: string,
+  todayPick: Facilitation | null,
+  year: number,
+  month: number, // 1-12
+): MonthCell[] {
+  const first = `${year}-${pad2(month)}-01`;
+  const dim = daysInMonth(year, month);
+  const last = `${year}-${pad2(month)}-${pad2(dim)}`;
+  const leading = mondayIndex(first); // days of the prev month shown before the 1st
+  const trailing = 6 - mondayIndex(last); // days of the next month after the last
+  const gridStart = addDays(first, -leading);
+  const totalDays = leading + dim + trailing;
+  const gridEnd = addDays(gridStart, totalDays - 1);
+
+  // history lookup: one recorded pick per day (history.date is UNIQUE).
+  const recorded = new Map<string, string>();
+  for (const f of history) if (!recorded.has(f.date)) recorded.set(f.date, f.memberId);
+
+  // Future half — replay the rotation forward from today. Ask for exactly the
+  // number of working days between tomorrow and the grid's end, so the projection
+  // covers the visible future and no more. predict() anchors on `history`, which
+  // includes today's pick, so predict[0] is tomorrow's facilitator (the seam).
+  let need = 0;
+  for (let d = today; d < gridEnd; ) {
+    d = addDays(d, 1);
+    if (isWorkingDay(d)) need++;
+  }
+  const predMap = new Map<string, Member>();
+  for (const p of predict(roster, history, leaves, today, need)) {
+    if (p.member) predMap.set(p.date, p.member);
+  }
+
+  const cells: MonthCell[] = [];
+  for (let i = 0; i < totalDays; i++) {
+    const date = addDays(gridStart, i);
+    const weekend = !isWorkingDay(date);
+    const isToday = date === today;
+    let member: Member | null = null;
+    let origin: MonthCell["origin"] = null;
+    if (!weekend) {
+      if (date < today) {
+        const id = recorded.get(date);
+        if (id) {
+          member = resolveMember(roster, id);
+          origin = "history";
+        }
+      } else if (isToday) {
+        if (todayPick) {
+          member = resolveMember(roster, todayPick.memberId);
+          origin = "today";
+        }
+      } else {
+        const p = predMap.get(date);
+        if (p) {
+          member = p;
+          origin = "predicted";
+        }
+      }
+    }
+    cells.push({
+      date,
+      inMonth: date >= first && date <= last,
+      weekend,
+      isToday,
+      member,
+      origin,
+      sent: !weekend && sentDates.has(date),
+    });
+  }
+  return cells;
+}

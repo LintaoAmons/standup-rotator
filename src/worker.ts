@@ -8,6 +8,7 @@
 // gated — the mandated "unauthenticated blocks the web, cron keeps running".
 
 import {
+  buildMonth,
   dayOf,
   formatSgt,
   isValidTime,
@@ -17,6 +18,7 @@ import {
   type Facilitation,
   type Leave,
   type Member,
+  type MonthCell,
   type Prediction,
 } from "./domain";
 import {
@@ -191,6 +193,12 @@ export default {
         return seeOther("/?flash=time-saved");
       }
 
+      // GET /calendar — the month view. Reads only; never triggers a pick. The
+      // ?month=YYYY-MM query drives navigation; absent, it shows today's SGT month.
+      if (path === "/calendar" && req.method === "GET") {
+        return html(await renderCalendar(repo, today(url), url.searchParams.get("month")));
+      }
+
       // GET / — the status + editing page. Reads only; never triggers a pick.
       if (path === "/" && req.method === "GET") {
         return html(await renderPage(repo, today(url), url.searchParams.get("flash")));
@@ -316,6 +324,10 @@ function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!,
   );
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, "0");
 }
 
 // Shared minimal styling — flat, thin-line, matches the project's design language.
@@ -544,7 +556,7 @@ async function renderPage(repo: Repo, date: string, flash: string | null = null)
 <body>
   <div class="topbar">
     <h1>Standup Roster</h1>
-    <form class="inline" method="post" action="/logout"><button type="submit">Sign out</button></form>
+    <span><a href="/calendar">Calendar</a> &nbsp; <form class="inline" method="post" action="/logout"><button type="submit">Sign out</button></form></span>
   </div>
   ${flashBanner}
   <div class="today">Today (${esc(date)}): ${todayLine}
@@ -623,6 +635,132 @@ async function renderPage(repo: Repo, date: string, flash: string | null = null)
     ${sendRows || '<tr><td class="empty" colspan="4">nothing sent yet</td></tr>'}
   </table>
   <p class="hint">The last 20 real Google Chat deliveries — automatic daily broadcasts and manual Announce presses, successes and failures alike. Nothing is logged when no webhook is configured.</p>
+</body>
+</html>`;
+}
+
+// Calendar-only styling: a 7-column Mon–Sun grid, still flat and thin-lined to
+// match STYLE. Kept beside renderCalendar because it is purely a rendering concern.
+const CALENDAR_STYLE = `
+  .cal { display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px; background: #8883; border: 1px solid #8883; }
+  .cal .dow { padding: 0.3rem 0.4rem; font-size: 0.7rem; text-transform: uppercase; opacity: 0.5; font-weight: 600; text-align: center; }
+  .cal .cell { background: #fff; min-height: 3.6rem; padding: 0.3rem 0.4rem; display: flex; flex-direction: column; }
+  @media (prefers-color-scheme: dark) { .cal .cell { background: #111; } }
+  .cal .cell.outside { opacity: 0.35; }
+  .cal .cell.weekend .who { display: none; }
+  .cal .cell.today { outline: 2px solid #3b82f6; outline-offset: -2px; }
+  .cal .daynum { font-size: 0.75rem; opacity: 0.6; }
+  .cal .cell.today .daynum { opacity: 1; font-weight: 700; color: #3b82f6; }
+  .cal .who { margin-top: auto; font-size: 0.9rem; line-height: 1.2; }
+  .cal .who.predicted { opacity: 0.6; font-style: italic; }
+  .cal .sent { color: #16a34a; font-weight: 700; }
+  .cal-nav { display: flex; align-items: baseline; gap: 1rem; margin: 1rem 0; }
+  .cal-nav .month { font-size: 1.1rem; font-weight: 600; }
+  .legend { font-size: 0.8rem; opacity: 0.6; margin-top: 0.8rem; display: flex; gap: 1.2rem; flex-wrap: wrap; }
+`;
+
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+// renderCalendar draws the month grid. It reuses the SAME todayPick the main
+// portal's Today line uses (repo.on(today)) and hands it to the pure buildMonth,
+// so the "today" cell and the Today line are the same value — the owner's added
+// acceptance criterion holds by construction, not by a parallel computation.
+async function renderCalendar(repo: Repo, today: string, monthParam: string | null): Promise<string> {
+  // Which month to show: a valid ?month=YYYY-MM, else today's SGT month.
+  let year: number, month: number;
+  if (monthParam && /^\d{4}-\d{2}$/.test(monthParam)) {
+    year = Number(monthParam.slice(0, 4));
+    month = Number(monthParam.slice(5, 7));
+  } else {
+    year = Number(today.slice(0, 4));
+    month = Number(today.slice(5, 7));
+  }
+
+  const roster = await repo.roster();
+  const leaves = await repo.leaves();
+  // 366 covers a full past year of daily picks so any navigated month renders its
+  // recorded history; predict() inside buildMonth fills the future half.
+  const recent = await repo.recent(366);
+  const todayPick: Facilitation | null = await repo.on(today);
+  // Sent history for the ✓ marks: the SGT date of every successful delivery. 500
+  // rows ≈ a year-plus of daily sends, enough to mark any month in view.
+  const sends = await repo.recentSends(500);
+  const sentDates = new Set(
+    sends.filter((s) => s.result === "sent").map((s) => formatSgt(s.sentAt).slice(0, 10)),
+  );
+
+  const cells: MonthCell[] = buildMonth(
+    roster, recent, leaves, sentDates, today, todayPick, year, month,
+  );
+
+  // The Today line, IDENTICAL to the main portal's — rendered here so the owner
+  // can eyeball it against the highlighted today cell on the same page.
+  const memberName = (id: string): string => roster.members.find((m) => m.id === id)?.name ?? id;
+  const todayLine = todayPick
+    ? `<strong>${esc(memberName(todayPick.memberId))}</strong>`
+    : `<em>not picked yet</em>`;
+
+  // Month navigation.
+  const prev = month === 1 ? `${year - 1}-12` : `${year}-${pad2(month - 1)}`;
+  const next = month === 12 ? `${year + 1}-01` : `${year}-${pad2(month + 1)}`;
+  const label = `${MONTH_NAMES[month - 1]} ${year}`;
+
+  const dowHeader = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    .map((d) => `<div class="dow">${d}</div>`)
+    .join("");
+
+  const cellHtml = cells
+    .map((c) => {
+      const cls = [
+        "cell",
+        c.inMonth ? "" : "outside",
+        c.weekend ? "weekend" : "",
+        c.isToday ? "today" : "",
+      ].filter(Boolean).join(" ");
+      const day = Number(c.date.slice(8, 10));
+      const who = c.member
+        ? `<div class="who ${c.origin === "predicted" ? "predicted" : ""}">${c.sent ? '<span class="sent">✓</span> ' : ""}${esc(c.member.name || c.member.id)}</div>`
+        : "";
+      return `<div class="${cls}"><span class="daynum">${day}</span>${who}</div>`;
+    })
+    .join("");
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Standup Roster — Calendar</title>
+<style>${STYLE}${CALENDAR_STYLE}</style>
+</head>
+<body>
+  <div class="topbar">
+    <h1>Standup Calendar</h1>
+    <span><a href="/">← Back to roster</a></span>
+  </div>
+  <div class="today">Today (${esc(today)}): ${todayLine}</div>
+
+  <div class="cal-nav">
+    <a href="/calendar?month=${prev}">← ${prev}</a>
+    <span class="month">${esc(label)}</span>
+    <a href="/calendar?month=${next}">${next} →</a>
+  </div>
+
+  <div class="cal">
+    ${dowHeader}
+    ${cellHtml}
+  </div>
+
+  <div class="legend">
+    <span><span class="sent">✓</span> announced (from Sent history)</span>
+    <span><em>italic</em> = predicted (not yet recorded)</span>
+    <span>weekends left blank</span>
+    <span>today outlined</span>
+  </div>
+  <p class="hint">Past working days show the recorded facilitator; today shows the recorded pick (same as the Today line above); future days are projected from the current rotation, order and leave — the same rule the daily announcement uses, so the calendar never disagrees with what actually gets sent.</p>
 </body>
 </html>`;
 }
